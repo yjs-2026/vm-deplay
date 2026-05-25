@@ -1,0 +1,33 @@
+# 依赖说明
+
+## 运行时依赖
+
+| 工具 | 安装命令 | 用途 |
+|------|----------|------|
+| dialog | `apt install dialog` | TUI 交互界面 |
+| govc | 参见 https://github.com/vmware/govmomi/tree/master/govc | vSphere/ESXi CLI |
+| python3 | `apt install python3` | 模板渲染、密码加密 |
+| sshpass | `apt install sshpass` | 非交互式 SSH 密码验证 |
+| nc / netcat | `apt install netcat-openbsd` | SSH 端口可达性检测 |
+| genisoimage | `apt install genisoimage` | 生成 cloud-init ISO |
+| xorriso | `apt install xorriso` | genisoimage 的替代方案 |
+
+## 可选依赖
+
+| 工具 | 安装命令 | 用途 |
+|------|----------|------|
+| cdrtools (macOS) | `brew install cdrtools` | macOS 下生成 ISO |
+
+## govc 安装方式
+
+```bash
+# Linux (下载二进制)
+curl -L https://github.com/vmware/govmomi/releases/latest/download/govc_Linux_x86_64.tar.gz | tar -xzf -
+mv govc /usr/local/bin/
+
+# macOS
+brew install govc
+
+# Docker
+docker pull vmware/govc:latest
+```
