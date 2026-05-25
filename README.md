@@ -1,26 +1,22 @@
 # VM 自动化部署工具（VMware + cloud-init）
 
-通过 `govc` + `cloud-init` 实现 VMware 虚拟机一键自动化部署，交互式 TUI 收集参数，无需手动配置。
+通过 `govc` + `cloud-init` 实现 VMware 虚拟机一键自动化部署，交互式 TUI 收集参数，无需手动配置。cloud-init 数据通过 VMware guestinfo 机制注入，**无需 ISO 文件**。
 
 ## 环境要求
 
 - **VMware vCenter / ESXi**（支持自签名证书）
-- **govc CLI**（已安装并配置环境变量，或在部署时输入）
-- **Ubuntu 24.04 OVF 模板**（已上传至 vCenter Datastore）
+- **govc CLI**（已安装并在 PATH 中）
+- **Ubuntu 24.04 OVF 模板**（已上传至 vCenter Datastore，且模板内置 cloud-init）
 - **Bash 4.0+**
-- **genisoimage** 或 **xorriso**（用于生成 cloud-init ISO）
 
 ## 依赖安装
 
 ```bash
 # Ubuntu/Debian
-apt install dialog govc python3 sshpass netcat-openbsd genisoimage
+apt install dialog govc python3 sshpass netcat-openbsd
 
 # macOS (Homebrew)
 brew install dialog govc python3 sshpass netcat
-
-# genisoimage (macOS)
-brew install cdrtools
 ```
 
 ## 目录结构
@@ -30,20 +26,18 @@ vm-deplay/
 ├── README.md
 ├── SPEC.md
 ├── deploy.sh                      # 主入口（TUI 交互）
-├── config/
-│   └── cloud-init-ubuntu2404.tpl  # cloud-init user-data 模板
 ├── scripts/
-│   ├── gen-cloud-init.sh         # 渲染 user-data（已集成到 deploy.sh）
-│   ├── create-vm.sh              # govc 创建 VM
-│   └── verify.sh                # 部署成功验证
+│   ├── create-vm.sh              # govc 创建 VM + guestinfo 注入
+│   └── verify.sh                 # 部署成功验证
 └── outputs/
-    └── deployment-log.txt        # 部署日志
+    └── deployment-log.txt         # 部署日志
 ```
 
 ## 快速开始
 
 ```bash
-cd /home/jinsongy/github/vm-deplay
+git clone https://github.com/yjs-2026/vm-deplay.git
+cd vm-deplay
 chmod +x deploy.sh scripts/*.sh
 ./deploy.sh
 ```
@@ -68,6 +62,18 @@ chmod +x deploy.sh scripts/*.sh
 | 软件包 | FTP 匿名下载 `wget` + `tar -xzf` 解压到指定目录 |
 | 磁盘扩展 | `growpart` + `resize2fs` 扩展根分区 |
 | 密码登录 | 部署完成后自动禁用（仅允许密钥） |
+
+## 技术原理
+
+VMware 原生支持通过 ExtraConfig (guestinfo) 传递 cloud-init 数据：
+
+| guestinfo 键 | 内容 |
+|---|---|
+| `guestinfo.metadata` | instance-id + local-hostname（YAML） |
+| `guestinfo.userdata` | 完整 #cloud-config（base64 编码） |
+| `guestinfo.have-cloud-init` | 标识位（`true`） |
+
+VM 开机后 cloud-init 自动从 guestinfo 读取，无需 CD-ROM 或 ISO。
 
 ## 验证方式
 
@@ -102,7 +108,7 @@ A: 脚本已设置 `GOVC_INSECURE=1`，自动信任自签名证书。
 A: 检查 Datastore 路径是否正确（格式：`/datastore-name/ova/ubuntu2404.ovf`），以及 govc 是否有足够权限。
 
 **Q: cloud-init 没有执行？**
-A: 确认 OVF 模板已内置 cloud-init 客户端（Ubuntu 24.04 官方镜像默认包含）。检查 VM 的 CD-ROM 是否挂载了生成的 cloud-init ISO。
+A: 确认 OVF 模板已内置 cloud-init 客户端（Ubuntu 24.04 官方镜像默认包含）。cloud-init 数据通过 guestinfo 注入，检查 VM 的 ExtraConfig 中是否有 `guestinfo.userdata`。
 
 **Q: 静态 IP 不生效？**
 A: 某些 OVF 模板自带网络管理，与 cloud-init 冲突。cloud-init 会通过 Netplan override 覆盖，VM 重启后生效。
