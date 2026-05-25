@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #===============================================================================
 # deploy.sh — VM 自动化部署主入口
-# 交互式 TUI，收集参数后调用 govc + cloud-init 完成部署
+# 交互式 TUI，收集参数后通过 govc + guestinfo 完成 cloud-init 部署
 #===============================================================================
 set -euo pipefail
 
@@ -72,7 +72,6 @@ step_vcenter() {
 
   VC_PASS=$(tui_password VC_PASS "密码" "请输入 vCenter 密码:")
 
-  # 提取 IP/域名（去掉 https:// 前缀和尾随斜杠）
   VC_HOST="$(echo "$VC_URL" | sed -E 's|https?://||' | cut -d':' -f1 | sed 's|/||g')"
 }
 
@@ -173,90 +172,143 @@ FTP URL : ${FTP_URL:-（未配置）}
   return 0
 }
 
-# ---------- 生成 cloud-init user-data ----------
-gen_cloud_init() {
-  log "生成 cloud-init user-data ..."
+# ---------- 生成 cloud-init userdata ----------
+gen_cloudinit_data() {
+  log "生成 cloud-init 数据 ..."
 
-  local tmpl="$CONFIG_DIR/cloud-init-ubuntu2404.tpl"
-  local out_dir="$OUTPUTS_DIR/cloud-init"
-  mkdir -p "$out_dir"
-
-  USER_DATA_OUT="$out_dir/user-data"
-  NETWORK_CONFIG_OUT="$out_dir/network-config"
-  ISO_OUT="$out_dir/$VM_NAME-cloud-init.iso"
+  # ---- userdata（#cloud-config 完整内容）----
+  local ud="$OUTPUTS_DIR/cloud-init-userdata.yaml"
+  USERDATA_OUT="$ud"
 
   # DNS 格式化
-  local dns_formatted
+  local dns_lines="        addresses:"
   if [[ -n "$DNS_SERVERS" ]]; then
-    dns_formatted=$(echo "$DNS_SERVERS" | python3 -c "
-import sys
-dns = sys.stdin.read().strip()
-lines = ['        addresses:']
-for d in dns.split(','):
-    d = d.strip()
-    if d:
-        lines.append(f'          - {d}')
-print('\n'.join(lines))
-")
+    for d in $(echo "$DNS_SERVERS" | tr ',' ' '); do
+      dns_lines+="
+          - ${d}"
+    done
   else
-    dns_formatted="        addresses: []"
+    dns_lines+="
+          - 8.8.8.8
+          - 8.8.4.4"
   fi
 
-  # SSH 公钥格式化（多行缩进）
-  local ssh_keys_formatted=""
+  # SSH 公钥格式化
+  local ssh_keys_yaml=""
   if [[ -n "$SSH_KEYS" ]]; then
     while IFS= read -r key; do
       [[ -z "$key" ]] && continue
       key="${key//[[:space:]]/}"
       [[ -z "$key" ]] && continue
-      ssh_keys_formatted+="  - ${key}"$'\n'
+      ssh_keys_yaml+="  - ${key}"$'\n'
     done <<< "$SSH_KEYS"
   fi
 
-  # 渲染模板
-  env \
-    VM_NAME="$VM_NAME" \
-    IP_ADDRESS="$IP_ADDRESS" \
-    NETMASK_BITS="$NETMASK_BITS" \
-    GATEWAY="$GATEWAY" \
-    DNS_SERVERS="$dns_formatted" \
-    SUDO_USER="$SUDO_USER" \
-    SUDO_PASSWD="$SUDO_PASSWD" \
-    SSH_KEYS="$ssh_keys_formatted" \
-    FTP_URL="${FTP_URL:-}" \
-    EXTRACT_DIR="${EXTRACT_DIR:-/opt}" \
-    DOWNLOAD_FILE="${DOWNLOAD_FILE:-package.tar.gz}" \
-    SECOND_DISK_GB="$SECOND_DISK_GB" \
-    envsubst < "$tmpl" > "$USER_DATA_OUT"
-
-  log "user-data 生成完成: $USER_DATA_OUT"
-
-  # 生成 network-config（cloud-init network-config）
-  cat > "$NETWORK_CONFIG_OUT" << EOF
-version: 2
-ethernets:
-  ens160:
-    addresses:
-      - $IP_ADDRESS/$NETMASK_BITS
-    gateway4: $GATEWAY
-    nameservers:
-      addresses:
-$dns_formatted
-    dhcp4: false
-EOF
-
-  log "network-config 生成完成: $NETWORK_CONFIG_OUT"
-
-  # 打包为 ISO（使用 genisoimage 或 xorriso）
-  if command -v genisoimage >/dev/null 2>&1; then
-    genisoimage -o "$ISO_OUT" -V "cidata" -J -r "$USER_DATA_OUT" "$NETWORK_CONFIG_OUT" 2>&1 | tee -a "$LOG_FILE"
-  elif command -v xorriso >/dev/null 2>&1; then
-    xorriso -as mkisofs -o "$ISO_OUT" -V cidata -J -r "$USER_DATA_OUT" "$NETWORK_CONFIG_OUT" 2>&1 | tee -a "$LOG_FILE"
-  else
-    die "需要 genisoimage 或 xorriso 来创建 cloud-init ISO，请安装: apt install genisoimage"
+  # FTP 下载命令（条件化）
+  local ftp_cmd="# （未配置 FTP 下载）"
+  if [[ -n "$FTP_URL" ]]; then
+    ftp_cmd="- bash -c \"wget -q -O /tmp/${DOWNLOAD_FILE} '${FTP_URL}' && tar -xzf /tmp/${DOWNLOAD_FILE} -C ${EXTRACT_DIR} && rm -f /tmp/${DOWNLOAD_FILE}\""
   fi
 
-  log "cloud-init ISO 生成完成: $ISO_OUT"
+  # 第二块盘挂载命令（条件化）
+  local disk2_cmd=""
+  if (( SECOND_DISK_GB > 0 )); then
+    disk2_cmd="- bash -c \"
+lsblk -no NAME /dev/sdb 2>/dev/null | grep -q sdb && {
+  mkfs.ext4 -F /dev/sdb 2>/dev/null || mkfs.ext4 -F /dev/sdb1 2>/dev/null || true
+  mkdir -p /home
+  mount /dev/sdb /home 2>/dev/null || mount /dev/sdb1 /home 2>/dev/null || true
+  grep -q '/dev/sdb1.*home' /etc/fstab || echo '/dev/sdb1 /home ext4 defaults,nofail 0 2' >> /etc/fstab
+  chown -R ${SUDO_USER}:${SUDO_USER} /home
+} || echo 'Second disk not found, skipping'\"
+"
+  fi
+
+  cat > "$ud" << EOF
+#cloud-config
+# VMware guestinfo userdata — 由 deploy.sh 自动生成
+
+hostname: ${VM_NAME}
+manage_etc_hosts: true
+
+users:
+  - name: ${SUDO_USER}
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    passwd: ""
+
+ssh_authorized_keys:
+${ssh_keys_yaml:-  # （未提供 SSH 公钥）}
+
+packages:
+  - curl
+  - wget
+  - tar
+  - gzip
+  - net-tools
+  - rsync
+  - cloud-init
+  - cloud-utils
+  - growpart
+  - parted
+
+disk_setup:
+  /dev/sdb:
+    table_type: gpt
+    layout:
+      - 100
+    overwrite: false
+
+fs_setup:
+  - label: data
+    device: /dev/sdb1
+    filesystem: ext4
+
+mounts:
+  - ["/dev/sdb1", "/home", "ext4", "defaults,nofail", "0", "2"]
+
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens160:
+      addresses:
+        - ${IP_ADDRESS}/${NETMASK_BITS}
+      gateway4: ${GATEWAY}
+      nameservers:
+${dns_lines}
+      dhcp4: false
+      optional: false
+
+runcmd:
+  - [sleep, 10]
+  - bash -c "echo '${SUDO_USER}:${SUDO_PASSWD}' | chpasswd -e"
+  - [netplan apply]
+  - [bash, -c, "growpart /dev/sda 1 || true"]
+  - [bash, -c, "resize2fs /dev/sda1 || true"]
+${disk2_cmd}${ftp_cmd}
+  - bash -c "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && systemctl restart sshd"
+
+power_state:
+  mode: reboot
+  delay: now
+  condition: True
+EOF
+
+  log "cloud-init userdata 生成完成: $USERDATA_OUT"
+
+  # ---- metadata（guestinfo 专用格式：instance-id + local-hostname）----
+  local md="$OUTPUTS_DIR/cloud-init-metadata.yaml"
+  METADATA_OUT="$md"
+
+  cat > "$md" << EOF
+instance-id: ${VM_NAME}-$(date +%s)
+local-hostname: ${VM_NAME}
+EOF
+
+  log "cloud-init metadata 生成完成: $METADATA_OUT"
 }
 
 # ---------- 执行 govc 部署 ----------
@@ -265,12 +317,13 @@ do_deploy() {
   log "  开始部署 VM: $VM_NAME"
   log "========================================="
 
-  export GOVC_URL="$VC_URL"
-  export GOVC_USERNAME="$VC_USER"
-  export GOVC_PASSWORD="$VC_PASS"
-  export GOVC_INSECURE=1
+  # 读取 cloud-init 数据
+  local userdata
+  local metadata
+  userdata=$(cat "$USERDATA_OUT")
+  metadata=$(cat "$METADATA_OUT")
 
-  # 调用 create-vm.sh
+  # 调用 create-vm.sh（通过环境变量传递）
   VM_NAME="$VM_NAME" \
   OVF_PATH="$OVF_PATH" \
   DATASTORE="$DATASTORE" \
@@ -280,11 +333,11 @@ do_deploy() {
   CPU="$CPU" \
   MEMORY_MB="$MEMORY_MB" \
   NETWORK_NAME="$PORTGROUP" \
-  ISO_FILE="$ISO_OUT" \
-  USER_DATA_FILE="$USER_DATA_OUT" \
-  NETWORK_CONFIG_FILE="$NETWORK_CONFIG_OUT" \
+  CLOUDINIT_USERDATA="$userdata" \
+  CLOUDINIT_METADATA="$metadata" \
   SECOND_DISK_GB="$SECOND_DISK_GB" \
   LOG_FILE="$LOG_FILE" \
+  GOVC_INSECURE=1 \
   bash "$SCRIPTS_DIR/create-vm.sh" 2>&1 | tee -a "$LOG_FILE"
 }
 
@@ -308,12 +361,10 @@ do_verify() {
 main() {
   check_deps
 
-  # 初始化日志
   echo "=========================================" >> "$LOG_FILE"
   log "部署会话开始"
   log "========================================="
 
-  # 执行 TUI 向导
   step_vcenter
   step_vm_info
   step_network
@@ -326,7 +377,7 @@ main() {
   fi
 
   # 部署
-  gen_cloud_init
+  gen_cloudinit_data
   do_deploy
   do_verify
 

@@ -15,15 +15,14 @@
 ```
 deploy.sh (主入口，TUI 交互)
     │
-    ├── config/cloud-init-ubuntu2404.tpl  ← cloud-init user-data 模板
-    │
     scripts/
-        ├── gen-cloud-init.sh   ← 渲染 user-data 模板
-        ├── create-vm.sh        ← govc 创建/部署 VM
-        └── verify.sh           ← 部署成功验证
+        ├── create-vm.sh    ← govc 创建 VM + guestinfo 注入 cloud-init
+        └── verify.sh       ← 部署成功验证
     │
     outputs/
-        └── deployment-log.txt  ← 部署日志
+        ├── deployment-log.txt
+        ├── cloud-init-userdata.yaml   ← 渲染后的 userdata
+        └── cloud-init-metadata.yaml   ← 渲染后的 metadata
 ```
 
 ## 3. TUI 交互字段
@@ -99,28 +98,41 @@ deploy.sh (主入口，TUI 交互)
 - `growpart` 扩展分区表
 - `resize2fs` 扩展文件系统
 
-## 5. govc 操作流程
+## 5. govc + guestinfo 操作流程
+
+VMware 原生支持通过 ExtraConfig (guestinfo) 传递 cloud-init 数据，**无需 ISO 挂载**。
+
+cloud-init 通过 VMware guestinfo 数据源读取以下 ExtraConfig 键：
+
+| ExtraConfig 键 | 内容 | 格式 |
+|----------------|------|------|
+| `guestinfo.metadata` | 实例ID + 主机名 | YAML（instance-id, local-hostname） |
+| `guestinfo.userdata` | 完整 cloud-init 配置 | #cloud-config YAML，base64 编码 |
+| `guestinfo.have-cloud-init` | 标识位 | `true` |
 
 ```bash
 # 1. 导出 vCenter 环境变量
 export GOVC_URL=$VC_URL
 export GOVC_USERNAME=$USER
 export GOVC_PASSWORD=$PASS
-export GOVC_TLS_CA_CERTS=$VC_CERT_PATH   # 自签名证书
-export GOVC_INSECURE=1                    # 允许不安全连接
+export GOVC_INSECURE=1                    # 自签名证书
 
 # 2. 创建 VM（从 OVF 部署）
 govc import.ovf -ds=$DATASTORE -pool=$POOL $OVF_PATH $VM_NAME
 
-# 3. 挂载 cloud-init ISO（user-data + network-config）
-govc vm.disk.attach -vm $VM_NAME -size $SECOND_DISK_SIZEG  # 可选第二块盘
-govc device.cdrom.insert -vm $VM_NAME -file "[$DATASTORE] $ISO_FILE"
-govc vm.change -vm $VM_NAME -c $CPU -m $MEMORY_MB
+# 3. 通过 guestinfo 注入 cloud-init 数据（base64 编码）
+govc vm.change -vm $VM_NAME \
+  -e "guestinfo.metadata=$(echo "$METADATA" | base64 -w0)" \
+  -e "guestinfo.userdata=$(echo "$USERDATA" | base64 -w0)" \
+  -e "guestinfo.have-cloud-init=true"
 
-# 4. 开机
+# 4. 添加第二块盘（可选）
+govc vm.disk.create -vm $VM_NAME -size ${SECOND_DISK_GB}G -name ${VM_NAME}-disk2 -ds=$DATASTORE
+
+# 5. 开机
 govc vm.power -on $VM_NAME
 
-# 5. 等待 cloud-init 完成（verify.sh）
+# 6. 等待 cloud-init 完成（verify.sh）
 ```
 
 ## 6. 验证方式

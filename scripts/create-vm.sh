@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #===============================================================================
-# create-vm.sh — 使用 govc 创建 VM 并挂载 cloud-init ISO
+# create-vm.sh — 使用 govc 创建 VM，通过 guestinfo 注入 cloud-init 数据
+# VMware 原生 cloud-init 支持，无需 ISO 交换
 #===============================================================================
 set -euo pipefail
 
@@ -13,18 +14,14 @@ VM_FOLDER="${VM_FOLDER:-/}"
 DATASTORE="${DATASTORE:-}"
 PORTGROUP="${PORTGROUP:-}"
 RESOURCE_POOL="${RESOURCE_POOL:-}"
-CLUSTER="${CLUSTER:-}"
 OVF_PATH="${OVF_PATH:-}"
-CUSTOMIZATION_SPEC="${CUSTOMIZATION_SPEC:-}"
 CPU="${CPU:-2}"
 MEMORY_MB="${MEMORY_MB:-4096}"
-DISK_SIZE_GB="${DISK_SIZE_GB:-40}"
 NETWORK_NAME="${NETWORK_NAME:-}"
-ISO_FILE="${ISO_FILE:-}"
 
-# cloud-init 文件（挂载到 VM）
-USER_DATA_FILE="${USER_DATA_FILE:-}"
-NETWORK_CONFIG_FILE="${NETWORK_CONFIG_FILE:-}"
+# cloud-init 数据（通过 guestinfo 注入）
+CLOUDINIT_USERDATA="${CLOUDINIT_USERDATA:-}"
+CLOUDINIT_METADATA="${CLOUDINIT_METADATA:-}"
 
 # 第二块盘大小（GB，0 表示不添加）
 SECOND_DISK_GB="${SECOND_DISK_GB:-0}"
@@ -47,6 +44,7 @@ die() {
 check_deps() {
   command -v govc >/dev/null 2>&1 || die "govc 未安装或不在 PATH 中"
   command -v python3 >/dev/null 2>&1 || die "python3 未安装"
+  command -v base64 >/dev/null 2>&1 || die "base64 未安装"
 }
 
 export_govc_env() {
@@ -57,11 +55,6 @@ export_govc_env() {
   export GOVC_INSECURE=1   # 自签名证书
   export GOVC_DATACENTER="${GOVC_DATACENTER:-ha-datacenter}"
   export GOVC_FOLDER="$VM_FOLDER"
-}
-
-# ---------- 获取 VM 唯一 ID ----------
-get_vm-ref() {
-  govc vm.info "$VM_NAME" 2>/dev/null | grep "UUID:" | awk '{print $2}' | tr -d ' '
 }
 
 # ---------- 等待 VM 进入目标状态 ----------
@@ -89,6 +82,46 @@ wait_for_state() {
   done
 }
 
+# ---------- 通过 guestinfo 注入 cloud-init 数据 ----------
+# cloud-init 通过 VMware guestinfo 数据源读取这些 ExtraConfig 键
+inject_cloudinit_guestinfo() {
+  local vm="$VM_NAME"
+  local metadata="$1"
+  local userdata="$2"
+
+  log "注入 cloud-init 数据到 guestinfo ..."
+
+  # guestinfo.metadata：包含主机名（cloud-init 专用格式）
+  if [[ -n "$metadata" ]]; then
+    local metadata_b64
+    metadata_b64=$(echo "$metadata" | base64 -w0)
+    log "设置 guestinfo.metadata (base64, ${#metadata_b64} 字符)"
+    govc vm.change \
+      -vm "$vm" \
+      -e "guestinfo.metadata=$metadata_b64" \
+      2>&1 | tee -a "$LOG_FILE"
+  fi
+
+  # guestinfo.userdata：完整的 cloud-init #cloud-config 内容
+  if [[ -n "$userdata" ]]; then
+    local userdata_b64
+    userdata_b64=$(echo "$userdata" | base64 -w0)
+    log "设置 guestinfo.userdata (base64, ${#userdata_b64} 字符)"
+    govc vm.change \
+      -vm "$vm" \
+      -e "guestinfo.userdata=$userdata_b64" \
+      2>&1 | tee -a "$LOG_FILE"
+  fi
+
+  # 设置 cloud-init 标识，通知 guest cloud-init 数据已就绪
+  govc vm.change \
+    -vm "$vm" \
+    -e "guestinfo.have-cloud-init=true" \
+    2>&1 | tee -a "$LOG_FILE"
+
+  log "cloud-init guestinfo 注入完成 ✓"
+}
+
 # ---------- 创建 VM ----------
 do_create_vm() {
   log "=== 开始创建 VM ==="
@@ -110,7 +143,6 @@ do_create_vm() {
   fi
 
   # 3. 导入 OVF（govc import.ovf）
-  #    如果 VM 已存在则跳过
   if ! govc vm.info "$VM_NAME" >/dev/null 2>&1; then
     log "正在导入 OVF 模板..."
     govc import.ovf \
@@ -147,32 +179,11 @@ do_create_vm() {
       -net.adapter=vmxnet3 2>&1 | tee -a "$LOG_FILE" || true
   fi
 
-  # 7. 挂载 cloud-init ISO（CD-ROM）
-  if [[ -n "$ISO_FILE" && -f "$ISO_FILE" ]]; then
-    log "挂载 cloud-init ISO: $ISO_FILE"
-    # 先获取 CD-ROM 设备
-    CDROM_DEV=$(govc vm.device.info -vm "$VM_NAME" 2>/dev/null | grep "CD-ROM" | head -1 | awk '{print $1}' | tr -d ':')
-    if [[ -n "$CDROM_DEV" ]]; then
-      govc device.cdrom.insert \
-        -vm "$VM_NAME" \
-        -device="$CDROM_DEV" \
-        -file="[$DATASTORE] $ISO_FILE" \
-        2>&1 | tee -a "$LOG_FILE"
-    else
-      # 没有 CD-ROM 则添加
-      govc device.cdrom.add \
-        -vm "$VM_NAME" \
-        2>&1 | tee -a "$LOG_FILE"
-      CDROM_DEV=$(govc vm.device.info -vm "$VM_NAME" 2>/dev/null | grep "CD-ROM" | head -1 | awk '{print $1}' | tr -d ':')
-      govc device.cdrom.insert \
-        -vm "$VM_NAME" \
-        -device="$CDROM_DEV" \
-        -file="[$DATASTORE] $ISO_FILE" \
-        2>&1 | tee -a "$LOG_FILE"
-    fi
-    log "cloud-init ISO 挂载完成 ✓"
+  # 7. 注入 cloud-init 数据（通过 guestinfo，无需 ISO）
+  if [[ -n "$CLOUDINIT_USERDATA" ]]; then
+    inject_cloudinit_guestinfo "$CLOUDINIT_METADATA" "$CLOUDINIT_USERDATA"
   else
-    log "警告: 未提供 cloud-init ISO 文件，跳过挂载"
+    log "警告: 未提供 cloud-init userdata，跳过 guestinfo 注入"
   fi
 
   # 8. 添加第二块盘（可选）
