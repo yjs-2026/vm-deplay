@@ -58,6 +58,15 @@ tui_yesno() {
     --yesno "$text" 15 65
 }
 
+# ---------- 日志 ----------
+log() {
+  local ts
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$ts] $*" | tee -a "$LOG_FILE"
+}
+
+die() { log "FATAL: $*"; exit 1; }
+
 # ---------- 通用验证函数 ----------
 # 返回 0=合法，1=非法，打印错误消息到 stderr
 validate_nonempty() {
