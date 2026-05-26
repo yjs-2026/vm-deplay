@@ -14,17 +14,14 @@ VM_FOLDER="${VM_FOLDER:-/}"
 DATASTORE="${DATASTORE:-}"
 PORTGROUP="${PORTGROUP:-}"
 RESOURCE_POOL="${RESOURCE_POOL:-}"
-OVF_PATH="${OVF_PATH:-}"
+VM_TEMPLATE="${VM_TEMPLATE:-}"
 CPU="${CPU:-2}"
-MEMORY_MB="${MEMORY_MB:-4096}"
+MEMORY_MB="${MEMORY_MB:-2048}"
 NETWORK_NAME="${NETWORK_NAME:-}"
 
 # cloud-init 数据（通过 guestinfo 注入）
 CLOUDINIT_USERDATA="${CLOUDINIT_USERDATA:-}"
 CLOUDINIT_METADATA="${CLOUDINIT_METADATA:-}"
-
-# 第二块盘大小（GB，0 表示不添加）
-SECOND_DISK_GB="${SECOND_DISK_GB:-0}"
 
 # ---------- 日志 ----------
 LOG_FILE="${LOG_FILE:-./outputs/deployment-log.txt}"
@@ -53,7 +50,7 @@ export_govc_env() {
   export GOVC_PASSWORD="$VC_PASS"
   export GOVC_TLS_CA_CERTS="${GOVC_TLS_CA_CERTS:-}"
   export GOVC_INSECURE=1   # 自签名证书
-  export GOVC_DATACENTER="${GOVC_DATACENTER:-ha-datacenter}"
+  export GOVC_DATACENTER=$(govc ls | awk -F'/' '{print $2}' | head -1)
   export GOVC_FOLDER="$VM_FOLDER"
 }
 
@@ -68,7 +65,7 @@ wait_for_state() {
   log "等待 VM '$vm' 进入状态: $state (超时 ${timeout}s)..."
   while true; do
     local current
-    current=$(govc vm.info "$vm" 2>/dev/null | grep "Runtime state:" | awk -F': ' '{print $2}' | tr -d ' ')
+    current=$(govc vm.info "$vm" 2>/dev/null | grep "Power state:" | awk -F': ' '{print $2}' | tr -d ' ')
     if [[ "$current" == "$state" ]]; then
       log "VM 状态: $state ✓"
       return 0
@@ -83,7 +80,9 @@ wait_for_state() {
 }
 
 # ---------- 通过 guestinfo 注入 cloud-init 数据 ----------
-# cloud-init 通过 VMware guestinfo 数据源读取这些 ExtraConfig 键
+# cloud-init 通过 VMware guestinfo 数据源读取 ExtraConfig 键
+# 官方文档要求：必须设置 encoding 参数（base64 或 gzip+base64）
+# 参考：https://docs.cloud-init.io/en/25.3/reference/datasources/vmware.html
 inject_cloudinit_guestinfo() {
   local vm="$VM_NAME"
   local metadata="$1"
@@ -91,29 +90,33 @@ inject_cloudinit_guestinfo() {
 
   log "注入 cloud-init 数据到 guestinfo ..."
 
-  # guestinfo.metadata：包含主机名（cloud-init 专用格式）
-  if [[ -n "$metadata" ]]; then
-    local metadata_b64
-    metadata_b64=$(echo "$metadata" | base64 -w0)
-    log "设置 guestinfo.metadata (base64, ${#metadata_b64} 字符)"
-    govc vm.change \
-      -vm "$vm" \
-      -e "guestinfo.metadata=$metadata_b64" \
-      2>&1 | tee -a "$LOG_FILE"
-  fi
+  # 编码后的数据
+  local meta_enc user_enc
+  meta_enc=$(echo -n "$metadata" | gzip | base64 | tr -d '\n')
+  user_enc=$(echo -n "$userdata" | gzip | base64 | tr -d '\n')
 
-  # guestinfo.userdata：完整的 cloud-init #cloud-config 内容
-  if [[ -n "$userdata" ]]; then
-    local userdata_b64
-    userdata_b64=$(echo "$userdata" | base64 -w0)
-    log "设置 guestinfo.userdata (base64, ${#userdata_b64} 字符)"
-    govc vm.change \
-      -vm "$vm" \
-      -e "guestinfo.userdata=$userdata_b64" \
-      2>&1 | tee -a "$LOG_FILE"
-  fi
+  # 1. 先关机（必须，文档要求）
+  log "关机 VM: $vm"
+  govc vm.power -off "$vm" 2>&1 | tee -a "$LOG_FILE" || true
+  sleep 5
 
-  # 设置 cloud-init 标识，通知 guest cloud-init 数据已就绪
+  # 2. 设置 guestinfo.metadata（gzip+base64 编码）
+  log "设置 guestinfo.metadata (gzip+base64, ${#meta_enc} chars)"
+  govc vm.change \
+    -vm "$vm" \
+    -e "guestinfo.metadata=$meta_enc" \
+    -e "guestinfo.metadata.encoding=gzip+base64" \
+    2>&1 | tee -a "$LOG_FILE"
+
+  # 3. 设置 guestinfo.userdata（gzip+base64 编码）
+  log "设置 guestinfo.userdata (gzip+base64, ${#user_enc} chars)"
+  govc vm.change \
+    -vm "$vm" \
+    -e "guestinfo.userdata=$user_enc" \
+    -e "guestinfo.userdata.encoding=gzip+base64" \
+    2>&1 | tee -a "$LOG_FILE"
+
+  # 4. 标识 cloud-init 数据已就绪
   govc vm.change \
     -vm "$vm" \
     -e "guestinfo.have-cloud-init=true" \
@@ -126,43 +129,36 @@ inject_cloudinit_guestinfo() {
 do_create_vm() {
   log "=== 开始创建 VM ==="
   log "  VM 名称: $VM_NAME"
-  log "  OVF 路径: $OVF_PATH"
+  log "  VM 模板: $VM_TEMPLATE"
   log "  Datastore: $DATASTORE"
   log "  CPU: $CPU | 内存: ${MEMORY_MB}MB"
   log "  Portgroup: $PORTGROUP"
-  log "  第二块盘: ${SECOND_DISK_GB}GB"
 
-  # 1. 检查 OVF 是否存在
-  if ! govc lsf "$OVF_PATH" >/dev/null 2>&1; then
-    die "OVF 模板不存在或路径错误: $OVF_PATH"
-  fi
-
-  # 2. 检查同名 VM 是否已存在
-  if govc vm.info "$VM_NAME" >/dev/null 2>&1; then
+  # 1. 检查同名 VM 是否已存在
+  existing=$(govc vm.info "$VM_NAME" 2>&1)
+  if [ -n "$existing" ]; then
     log "警告: VM '$VM_NAME' 已存在，将尝试使用现有 VM"
   fi
 
-  # 3. 导入 OVF（govc import.ovf）
-  if ! govc vm.info "$VM_NAME" >/dev/null 2>&1; then
-    log "正在导入 OVF 模板..."
-    govc import.ovf \
-      -ds="$DATASTORE" \
-      -pool="$RESOURCE_POOL" \
-      -folder="$VM_FOLDER" \
-      -name="$VM_NAME" \
-      -force=true \
-      "$OVF_PATH" \
-      2>&1 | tee -a "$LOG_FILE"
-    log "OVF 导入完成 ✓"
+  # 2. 从模板克隆 VM（全克隆，不使用链接克隆）
+  if [ -z "$existing" ]; then
+    log "正在从模板克隆 VM ..."
+
+    # 构建 clone 命令（RESOURCE_POOL 为空时不加 -pool 参数）
+    local clone_cmd=(govc vm.clone -vm="$VM_TEMPLATE" -ds="$DATASTORE" -folder="$VM_FOLDER" "$VM_NAME")
+    if [[ -n "$RESOURCE_POOL" ]]; then
+      clone_cmd+=(-pool="$RESOURCE_POOL")
+    fi
+    "${clone_cmd[@]}" 2>&1 | tee -a "$LOG_FILE"
+    log "模板克隆完成 ✓"
   else
-    log "VM 已存在，跳过 OVF 导入"
+    log "VM 已存在，跳过克隆"
   fi
 
-  # 4. 等待 VM 创建完成
+  # 3. 克隆后 VM 默认是 poweredOn，等待 5s 让硬件就绪
   sleep 5
-  wait_for_state "$VM_NAME" "poweredOff" 120
 
-  # 5. 配置 VM（CPU、内存）
+  # 4. 配置 VM（CPU、内存）
   log "配置 VM 规格: CPU=$CPU, Memory=${MEMORY_MB}MB"
   govc vm.change \
     -vm "$VM_NAME" \
@@ -170,7 +166,7 @@ do_create_vm() {
     -m "$MEMORY_MB" \
     2>&1 | tee -a "$LOG_FILE"
 
-  # 6. 配置网络
+  # 5. 配置网络
   if [[ -n "$NETWORK_NAME" ]]; then
     log "配置网络: $NETWORK_NAME"
     govc vm.network.change \
@@ -179,26 +175,15 @@ do_create_vm() {
       -net.adapter=vmxnet3 2>&1 | tee -a "$LOG_FILE" || true
   fi
 
-  # 7. 注入 cloud-init 数据（通过 guestinfo，无需 ISO）
+  # 6. 注入 cloud-init 数据（通过 guestinfo，无需 ISO）
+  #    必须在关机状态下注入，文档要求
   if [[ -n "$CLOUDINIT_USERDATA" ]]; then
     inject_cloudinit_guestinfo "$CLOUDINIT_METADATA" "$CLOUDINIT_USERDATA"
   else
     log "警告: 未提供 cloud-init userdata，跳过 guestinfo 注入"
   fi
 
-  # 8. 添加第二块盘（可选）
-  if (( SECOND_DISK_GB > 0 )); then
-    log "添加第二块数据盘: ${SECOND_DISK_GB}GB"
-    govc vm.disk.create \
-      -vm "$VM_NAME" \
-      -size "${SECOND_DISK_GB}G" \
-      -name "${VM_NAME}-disk2" \
-      -ds="$DATASTORE" \
-      2>&1 | tee -a "$LOG_FILE"
-    log "第二块盘添加完成 ✓"
-  fi
-
-  # 9. 开机
+  # 7. 开机（inject_cloudinit_guestinfo 已将 VM 关机，注入完成后重新开机）
   log "启动 VM: $VM_NAME"
   govc vm.power -on "$VM_NAME" 2>&1 | tee -a "$LOG_FILE"
 

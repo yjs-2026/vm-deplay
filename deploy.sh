@@ -46,10 +46,10 @@ tui_input() {
   echo "$result"
 }
 tui_password() {
-  local title="$1"; local text="$2"
+  local title="$1"; local text="$2"; local def="${3:-}"
   local result
   result=$(dialog --ok-label "下一步" --backtitle "VM 部署向导" \
-    --passwordbox "$text" 12 60 "" 3>&1 1>&2 2>&3)
+    --passwordbox "$text" 12 60 "$def" 3>&1 1>&2 2>&3)
   echo "$result"
 }
 tui_yesno() {
@@ -129,10 +129,8 @@ step_vcenter() {
   tui_clear
   dialog --backtitle "VM 部署向导" --title "步骤 1/6" \
     --msgbox "VM 自动化部署向导\n\n请提供 vCenter 连接信息和 VM 部署参数" 8 60
-
-  # VC_URL
   while true; do
-    VC_URL=$(tui_input "" "vCenter 地址" "请输入 vCenter URL:\n例: https://vc.example.com" "")
+    VC_URL=$(tui_input "" "vCenter 地址" "请输入 vCenter URL:\n例: https://vc.example.com" "https://192.168.218.6")
     if validate_nonempty "$VC_URL" "vCenter URL"; then
       validate_url "$VC_URL" "vCenter URL" && break
     fi
@@ -141,14 +139,14 @@ step_vcenter() {
 
   # VC_USER
   while true; do
-    VC_USER=$(tui_input "" "用户名" "请输入 vCenter 用户名:\n格式: user@domain" "")
+    VC_USER=$(tui_input "" "用户名" "请输入 vCenter 用户名:\n格式: user@domain" "administrator@vsphere.local")
     if validate_nonempty "$VC_USER" "用户名"; then break; fi
     tui_error "用户名不能为空"
   done
 
   # VC_PASS
   while true; do
-    VC_PASS=$(tui_password "密码" "请输入 vCenter 密码:")
+    VC_PASS=$(tui_password "密码" "请输入 vCenter 密码:" "VMware1!")
     if validate_nonempty "$VC_PASS" "密码"; then break; fi
     tui_error "密码不能为空"
   done
@@ -165,23 +163,23 @@ step_vm_info() {
     tui_error "VM 名称不能为空"
   done
 
-  # OVF_PATH
+  # VM_TEMPLATE
   while true; do
-    OVF_PATH=$(tui_input "" "OVF 模板路径" "请输入 Datastore 中的 OVF 模板路径:\n例: /datastore/ova/ubuntu2404.ovf" "")
-    if validate_nonempty "$OVF_PATH" "OVF 路径"; then break; fi
-    tui_error "OVF 路径不能为空"
+    VM_TEMPLATE=$(tui_input "" "VM 模板路径" "请输入 vCenter 中的 VM 模板路径:\n例: /vm/Templates/ubuntu2404" "/Datacenter/vm/ubuntu2404")
+    if validate_nonempty "$VM_TEMPLATE" "VM 模板路径"; then break; fi
+    tui_error "VM 模板路径不能为空"
   done
 
   # DATASTORE
   while true; do
-    DATASTORE=$(tui_input "" "Datastore" "请输入目标 Datastore 名称:\n（VM 将创建在此存储上）" "")
+    DATASTORE=$(tui_input "" "Datastore" "请输入目标 Datastore 名称:\n（VM 将创建在此存储上）" "datastore1")
     if validate_nonempty "$DATASTORE" "Datastore"; then break; fi
     tui_error "Datastore 不能为空"
   done
 
   # PORTGROUP
   while true; do
-    PORTGROUP=$(tui_input "" "网络" "请输入 Portgroup / 网络标签名称:\n（VM 将连接到此网络）" "")
+    PORTGROUP=$(tui_input "" "网络" "请输入 Portgroup / 网络标签名称:\n（VM 将连接到此网络）" "VM Network")
     if validate_nonempty "$PORTGROUP" "Portgroup"; then break; fi
     tui_error "Portgroup 不能为空"
   done
@@ -190,7 +188,7 @@ step_vm_info() {
   RESOURCE_POOL=$(tui_input "" "资源池" "请输入 Resource Pool 路径:\n（留空使用默认资源池）\n例: /Cluster/Resources/DefaultPool" "")
 
   # VM_FOLDER（选填，有默认值）
-  VM_FOLDER=$(tui_input "" "VM 文件夹" "请输入 vCenter VM 文件夹路径:\n（留空使用 /vm）\n例: /vm" "/vm")
+  VM_FOLDER=$(tui_input "" "VM 文件夹" "请输入 vCenter VM 文件夹路径:\n（留空使用 /Datacenter/vm）\n例: /Datacenter/vm" "/Datacenter/vm")
 
   # CPU
   while true; do
@@ -201,7 +199,7 @@ step_vm_info() {
 
   # MEMORY_MB
   while true; do
-    MEMORY_MB=$(tui_input "" "内存大小" "请输入内存大小（MB）:" "4096")
+    MEMORY_MB=$(tui_input "" "内存大小" "请输入内存大小（MB）:" "2048")
     if validate_positive_int "$MEMORY_MB" "内存大小"; then break; fi
     tui_error "内存大小需为正整数"
   done
@@ -211,7 +209,7 @@ step_vm_info() {
 step_network() {
   # IP_ADDRESS
   while true; do
-    IP_ADDRESS=$(tui_input "" "静态 IP 地址" "请输入 VM 的静态 IP 地址:\n例: 192.168.1.100" "")
+    IP_ADDRESS=$(tui_input "" "静态 IP 地址" "请输入 VM 的静态 IP 地址:\n例: 192.168.1.100" "192.168.218.11")
     if validate_nonempty "$IP_ADDRESS" "IP 地址" && \
        validate_ipv4 "$IP_ADDRESS" "IP 地址"; then break; fi
   done
@@ -226,13 +224,13 @@ step_network() {
 
   # GATEWAY
   while true; do
-    GATEWAY=$(tui_input "" "网关" "请输入默认网关 IP 地址:\n例: 192.168.1.1" "")
+    GATEWAY=$(tui_input "" "网关" "请输入默认网关 IP 地址:\n例: 192.168.1.1" "192.168.218.2")
     if validate_nonempty "$GATEWAY" "网关" && \
        validate_ipv4 "$GATEWAY" "网关"; then break; fi
   done
 
   # DNS_SERVERS（选填）
-  DNS_SERVERS=$(tui_input "" "DNS 服务器" "请输入 DNS 服务器:\n（逗号分隔，多个 DNS 留空使用 Google DNS）\n例: 8.8.8.8,8.8.4.4" "8.8.8.8,8.8.4.4")
+  DNS_SERVERS=$(tui_input "" "DNS 服务器" "请输入 DNS 服务器:\n（逗号分隔，多个 DNS 留空使用 Google DNS）\n例: 8.8.8.8,8.8.4.4" "192.168.218.2")
 }
 
 # ---------- 步骤 4: 系统配置 ----------
@@ -253,47 +251,17 @@ step_system() {
 
   # SSH 公钥（选填）
   SSH_KEY_FILE=$(tui_input "" "SSH 公钥" "请输入 SSH 公钥文件路径或直接粘贴公钥内容:\n（支持 ~/.ssh/id_rsa.pub 或直接粘贴 ssh-rsa AAAA... 格式）\n留空则不注入公钥" "")
-  if [[ -f "$SSH_KEY_FILE" ]]; then
-    SSH_KEYS=$(cat "$SSH_KEY_FILE")
-  else
-    SSH_KEYS="$SSH_KEY_FILE"
+  SSH_KEYS=""
+  if [[ -n "$SSH_KEY_FILE" ]]; then
+    if [[ -f "$SSH_KEY_FILE" ]]; then
+      SSH_KEYS=$(<"$SSH_KEY_FILE")
+    else
+      SSH_KEYS="$SSH_KEY_FILE"
+    fi
   fi
-
-  # SECOND_DISK_GB
-  while true; do
-    SECOND_DISK_GB=$(tui_input "" "第二块盘" "请输入第二块数据盘大小（GB）:\n（0 表示不添加第二块盘）\n第二块盘将自动格式化为 ext4 并挂载到 /home" "0")
-    if validate_nonneg_int "$SECOND_DISK_GB" "第二块盘大小"; then break; fi
-    tui_error "第二块盘大小需为整数"
-  done
 }
 
-# ---------- 步骤 5: 软件包下载 ----------
-step_package() {
-  # FTP_URL（选填）
-  FTP_URL=$(tui_input "" "FTP 下载" "请输入 FTP 匿名下载 URL:\n例: ftp://192.168.1.100/software.tar.gz\n留空则跳过软件包下载" "")
-
-  # DOWNLOAD_FILE（选填，但 FTP_URL 非空时必填）
-  while true; do
-    DOWNLOAD_FILE=$(tui_input "" "下载文件名" "请输入保存到本地的文件名:\n例: package.tar.gz" "package.tar.gz")
-    if [[ -n "$FTP_URL" ]]; then
-      validate_nonempty "$DOWNLOAD_FILE" "下载文件名" && break
-    else
-      break
-    fi
-  done
-
-  # EXTRACT_DIR（选填，但 FTP_URL 非空时必填）
-  while true; do
-    EXTRACT_DIR=$(tui_input "" "解压目录" "请输入解压目标目录:\n（软件包将解压到此目录）\n例: /opt/app" "/opt/app")
-    if [[ -n "$FTP_URL" ]]; then
-      validate_nonempty "$EXTRACT_DIR" "解压目录" && break
-    else
-      break
-    fi
-  done
-}
-
-# ---------- 步骤 6: 确认并开始部署 ----------
+# ---------- 步骤 5: 确认并开始部署 ----------
 step_confirm() {
   local confirm_text="
 ========== 部署确认 ==========
@@ -302,7 +270,7 @@ vCenter : $VC_URL
 用户    : $VC_USER
 
 VM 名称 : $VM_NAME
-OVF     : $OVF_PATH
+模板    : $VM_TEMPLATE
 存储    : $DATASTORE
 网络    : $PORTGROUP
 CPU     : $CPU 核心
@@ -313,10 +281,8 @@ IP 地址 : $IP_ADDRESS/${NETMASK_BITS}
 DNS     : $DNS_SERVERS
 
 用户    : $SUDO_USER
-第二块盘: ${SECOND_DISK_GB}GB
 
-FTP URL : ${FTP_URL:-（未配置）}
-解压到  : ${EXTRACT_DIR:-（未配置）}
+qoder  : /var/soft/qoder.tgz → 解压到 /home/${SUDO_USER}/
 
 ================================
 "
@@ -349,112 +315,44 @@ gen_cloudinit_data() {
   if [[ -n "$SSH_KEYS" ]]; then
     while IFS= read -r key; do
       [[ -z "$key" ]] && continue
-      key="${key//[[:space:]]/}"
-      [[ -z "$key" ]] && continue
       ssh_keys_yaml+="  - ${key}"$'\n'
     done <<< "$SSH_KEYS"
   fi
 
-  # FTP 下载命令（条件化）
-  local ftp_cmd=""
-  if [[ -n "$FTP_URL" ]]; then
-    ftp_cmd="- bash -c \"wget -q -O /tmp/${DOWNLOAD_FILE} '${FTP_URL}' && tar -xzf /tmp/${DOWNLOAD_FILE} -C ${EXTRACT_DIR} && rm -f /tmp/${DOWNLOAD_FILE}\""
-  fi
-
-  # 第二块盘挂载命令（条件化）
-  local disk2_cmd=""
-  if (( SECOND_DISK_GB > 0 )); then
-    disk2_cmd="- bash -c \"
-lsblk -no NAME /dev/sdb 2>/dev/null | grep -q sdb && {
-  mkfs.ext4 -F /dev/sdb 2>/dev/null || mkfs.ext4 -F /dev/sdb1 2>/dev/null || true
-  mkdir -p /home
-  mount /dev/sdb /home 2>/dev/null || mount /dev/sdb1 /home 2>/dev/null || true
-  grep -q '/dev/sdb1.*home' /etc/fstab || echo '/dev/sdb1 /home ext4 defaults,nofail 0 2' >> /etc/fstab
-  chown -R ${SUDO_USER}:${SUDO_USER} /home
-} || echo 'Second disk not found, skipping'\"
-"
-  fi
-
-  cat > "$ud" << EOF
-#cloud-config
-# VMware guestinfo userdata — 由 deploy.sh 自动生成
-
-hostname: ${VM_NAME}
-manage_etc_hosts: true
-
-users:
-  - name: ${SUDO_USER}
-    groups: sudo
-    shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: false
-    passwd: ""
-
-ssh_authorized_keys:
-${ssh_keys_yaml:-  # （未提供 SSH 公钥）}
-
-packages:
-  - curl
-  - wget
-  - tar
-  - gzip
-  - net-tools
-  - rsync
-  - cloud-init
-  - cloud-utils
-  - growpart
-  - parted
-
-disk_setup:
-  /dev/sdb:
-    table_type: gpt
-    layout:
-      - 100
-    overwrite: false
-
-fs_setup:
-  - label: data
-    device: /dev/sdb1
-    filesystem: ext4
-
-mounts:
-  - ["/dev/sdb1", "/home", "ext4", "defaults,nofail", "0", "2"]
-
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    ens160:
-      addresses:
-        - ${IP_ADDRESS}/${NETMASK_BITS}
-      gateway4: ${GATEWAY}
-      nameservers:
-${dns_lines}
-      dhcp4: false
-      optional: false
-
-runcmd:
-  - [sleep, 10]
-  - bash -c "echo '${SUDO_USER}:${SUDO_PASSWD}' | chpasswd -e"
-  - [netplan apply]
-  - [bash, -c, "growpart /dev/sda 1 || true"]
-  - [bash, -c, "resize2fs /dev/sda1 || true"]
-${disk2_cmd}${ftp_cmd}
-  - bash -c "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && systemctl restart sshd"
-
-power_state:
-  mode: reboot
-  delay: now
-  condition: True
-EOF
+  # cloud-init userdata 生成（Python 脚本做模板渲染，变量通过命令行参数传入）
+  local gen_py="$SCRIPT_DIR/scripts/gen-userdata.py"
+  python3 "$gen_py" \
+    "${VM_NAME}" \
+    "${SUDO_USER}" \
+    "${SUDO_PASSWD}" \
+    "${ssh_keys_yaml}" \
+    "$USERDATA_OUT"
 
   log "cloud-init userdata 生成完成: $USERDATA_OUT"
 
   local md="$OUTPUTS_DIR/cloud-init-metadata.yaml"
   METADATA_OUT="$md"
+
+  # metadata 中的 network config（Cloud Config Version 2）
+  local network_yaml=""
+  network_yaml="network:
+  version: 2
+  ethernets:
+    ens33:
+      addresses:
+        - ${IP_ADDRESS}/${NETMASK_BITS}
+      nameservers:
+${dns_lines}
+      routes:
+        - to: default
+          via: ${GATEWAY}
+      dhcp4: false
+      optional: false"
+
   cat > "$md" << EOF
 instance-id: ${VM_NAME}-$(date +%s)
 local-hostname: ${VM_NAME}
+${network_yaml}
 EOF
   log "cloud-init metadata 生成完成: $METADATA_OUT"
 }
@@ -469,8 +367,11 @@ do_deploy() {
   userdata=$(cat "$USERDATA_OUT")
   metadata=$(cat "$METADATA_OUT")
 
+  VC_URL="$VC_URL" \
+  VC_USER="$VC_USER" \
+  VC_PASS="$VC_PASS" \
   VM_NAME="$VM_NAME" \
-  OVF_PATH="$OVF_PATH" \
+  VM_TEMPLATE="$VM_TEMPLATE" \
   DATASTORE="$DATASTORE" \
   PORTGROUP="$PORTGROUP" \
   RESOURCE_POOL="$RESOURCE_POOL" \
@@ -480,7 +381,6 @@ do_deploy() {
   NETWORK_NAME="$PORTGROUP" \
   CLOUDINIT_USERDATA="$userdata" \
   CLOUDINIT_METADATA="$metadata" \
-  SECOND_DISK_GB="$SECOND_DISK_GB" \
   LOG_FILE="$LOG_FILE" \
   GOVC_INSECURE=1 \
   bash "$SCRIPTS_DIR/create-vm.sh" 2>&1 | tee -a "$LOG_FILE"
@@ -496,7 +396,6 @@ do_verify() {
   SUDO_USER="$SUDO_USER" \
   VERIFY_PASS="$SUDO_PASSWD" \
   VERIFY_USER="$SUDO_USER" \
-  DEST_DIR="${EXTRACT_DIR:-}" \
   LOG_FILE="$LOG_FILE" \
   SSH_TIMEOUT=600 \
   bash "$SCRIPTS_DIR/verify.sh" 2>&1 | tee -a "$LOG_FILE"
@@ -514,7 +413,6 @@ main() {
   step_vm_info
   step_network
   step_system
-  step_package
 
   if ! step_confirm; then
     tui_msg "用户取消部署"

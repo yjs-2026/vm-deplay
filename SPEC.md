@@ -7,7 +7,7 @@
 **环境要求：**
 - VMware vCenter / ESXi（自签名证书）
 - govc CLI（已安装并配置环境变量）
-- Ubuntu 24.04 OVF 模板（已上传至 vCenter Datastore）
+- Ubuntu 24.04 VM 模板（已导入 vCenter）
 - Bash 4.0+
 
 ## 2. 系统架构
@@ -38,7 +38,7 @@ deploy.sh (主入口，TUI 交互)
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | VM 名称 | 文本 | 部署后的显示名 |
-| OVF 模板路径 | 文本 | Datastore 路径，如 /datastore/ova/ubuntu2404.ovf |
+| VM 模板路径 | 文本 | vCenter 中的模板路径，如 /vm/Templates/ubuntu2404 |
 | Datastore | 文本 | 目标存储名称 |
 | Portgroup / 网络 | 文本 | 目标网络标签 |
 | 集群 / Resource Pool | 文本 | 可留空使用默认 |
@@ -59,14 +59,14 @@ deploy.sh (主入口，TUI 交互)
 | SSH 公钥 | 多行文本 | 支持粘贴或从文件读取 |
 | 第二块盘大小 | 数字 | 单位：GB，0 表示不添加 |
 
-### 步骤5：软件包下载
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| FTP URL | 文本 | 匿名下载，如 ftp://192.168.1.100/pkg.tar.gz |
-| 解压目标目录 | 文本 | 如 /opt/app |
-| 下载文件名 | 文本 | 保存到本地临时文件名 |
+### 4.5 qoder 软件包
+- 模板镜像已内置 `/var/soft/qoder.tgz`
+- 首次启动自动解压到 `/home/<user>/`
+- 解压后设置正确属主
 
-## 4. cloud-init 自动化内容
+### 4.6 磁盘扩展
+- `growpart` 扩展分区表
+- `resize2fs` 扩展文件系统
 
 ### 4.1 静态网络
 通过 Netplan YAML 配置（Ubuntu 24.04）：
@@ -89,15 +89,6 @@ deploy.sh (主入口，TUI 交互)
 - 挂载到 `/home`
 - 写入 `/etc/fstab` 持久化
 
-### 4.5 软件包下载
-- `runcmd` 执行 `wget -O /tmp/<file> <ftp-url>`
-- `tar -xzf` 解压到指定目录
-- 清理临时文件
-
-### 4.6 磁盘扩展
-- `growpart` 扩展分区表
-- `resize2fs` 扩展文件系统
-
 ## 5. govc + guestinfo 操作流程
 
 VMware 原生支持通过 ExtraConfig (guestinfo) 传递 cloud-init 数据，**无需 ISO 挂载**。
@@ -117,8 +108,8 @@ export GOVC_USERNAME=$USER
 export GOVC_PASSWORD=$PASS
 export GOVC_INSECURE=1                    # 自签名证书
 
-# 2. 创建 VM（从 OVF 部署）
-govc import.ovf -ds=$DATASTORE -pool=$POOL $OVF_PATH $VM_NAME
+# 2. 从模板克隆 VM（全克隆）
+govc vm.clone -vm=$VM_TEMPLATE -ds=$DATASTORE -pool=$POOL -folder=$VM_FOLDER $VM_NAME
 
 # 3. 通过 guestinfo 注入 cloud-init 数据（base64 编码）
 govc vm.change -vm $VM_NAME \
@@ -126,13 +117,10 @@ govc vm.change -vm $VM_NAME \
   -e "guestinfo.userdata=$(echo "$USERDATA" | base64 -w0)" \
   -e "guestinfo.have-cloud-init=true"
 
-# 4. 添加第二块盘（可选）
-govc vm.disk.create -vm $VM_NAME -size ${SECOND_DISK_GB}G -name ${VM_NAME}-disk2 -ds=$DATASTORE
-
-# 5. 开机
+# 4. 开机
 govc vm.power -on $VM_NAME
 
-# 6. 等待 cloud-init 完成（verify.sh）
+# 5. 等待 cloud-init 完成（verify.sh）
 ```
 
 ## 6. 验证方式
@@ -143,7 +131,7 @@ govc vm.power -on $VM_NAME
 | SSH 端口开放 | `nc -zv $IP 22` | 连接成功 |
 | cloud-init 完成 | `ssh $USER@$IP cloud-init status` | 输出 `status: done` |
 | 第二块盘挂载 | `ssh $USER@$IP df -h \| grep /home` | 有输出 |
-| 软件包存在 | `ssh $USER@$IP ls $DEST_DIR/` | 文件列表非空 |
+| qoder 解压 | `ssh $USER@$IP ls /home/$USER/` | 文件列表非空 |
 
 验证超时：600 秒，轮询间隔 15 秒。
 
@@ -166,7 +154,7 @@ Datastore  : $DATASTORE
 [$(timestamp)] VM 已开机，等待 SSH...
 [$(timestamp)] cloud-init 完成，验证通过
 [$(timestamp)] 第二块盘已挂载 /home
-[$(timestamp)] 软件包下载完成
+[$(timestamp)] qoder 解压完成
 === 部署成功 ===
 ```
 
