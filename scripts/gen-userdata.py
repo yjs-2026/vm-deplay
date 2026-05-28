@@ -5,6 +5,18 @@ gen-userdata.py — 生成 cloud-init userdata
 """
 import sys
 import yaml
+import subprocess
+
+
+def encrypt_password(plain):
+    """使用 mkpasswd 生成 SHA-512 加密密码"""
+    result = subprocess.run(
+        ["mkpasswd", "--method=SHA-512", "--rounds=4096", plain],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"mkpasswd failed: {result.stderr}")
+    return result.stdout.strip()
 
 
 def main():
@@ -18,7 +30,9 @@ def main():
     ssh_keys  = sys.argv[4]
     out_path  = sys.argv[5]
 
-    # 密码（明文，cloud-init 会加密存储）
+    # 密码加密（使用 mkpasswd SHA-512，rounds=4096）
+    hashed_pass = encrypt_password(sudo_pass)
+
     # qoder 解压：用 sudo_user 查 home 目录
     tar_cmd = (
         f"bash -c \"TARGET=$(getent passwd {sudo_user} | cut -d: -f6) "
@@ -35,7 +49,7 @@ def main():
                 "shell": "/bin/bash",
                 "sudo": "ALL=(ALL) NOPASSWD:ALL",
                 "lock_passwd": False,
-                "plain_text_passwd": sudo_pass,
+                "passwd": hashed_pass,
             }
         ],
         "packages": [
