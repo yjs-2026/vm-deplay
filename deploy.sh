@@ -305,36 +305,41 @@ gen_cloudinit_data() {
   local ud="$OUTPUTS_DIR/cloud-init-userdata.yaml"
   USERDATA_OUT="$ud"
 
-  # DNS 格式化
-  local dns_lines=""
+  # DNS 格式化（nameservers.addresses 嵌套，cloud-init/datasource/vmware 要求）
+  # 缩进：nameservers(6) → addresses(8) → DNS entries(10)
+  local dns_addr_lines=""
   if [[ -n "$DNS_SERVERS" ]]; then
     for d in $(echo "$DNS_SERVERS" | tr ',' ' '); do
-      dns_lines+="
-          - ${d}"
+      dns_addr_lines+="          - ${d}"$'\n'
     done
   else
-    dns_lines="
-          - 8.8.8.8
-          - 8.8.4.4"
+    dns_addr_lines="          - 8.8.8.8"$'\n'"          - 8.8.4.4"$'\n'
   fi
 
-  # SSH 公钥格式化
-  local ssh_keys_yaml=""
-  if [[ -n "$SSH_KEYS" ]]; then
-    while IFS= read -r key; do
-      [[ -z "$key" ]] && continue
-      ssh_keys_yaml+="  - ${key}"$'\n'
-    done <<< "$SSH_KEYS"
-  fi
+    # SSH 公钥格式化
+    local ssh_keys_yaml=""
+    if [[ -n "$SSH_KEYS" ]]; then
+      while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+        ssh_keys_yaml+="  - ${key}"$'\\n'
+      done <<< "$SSH_KEYS"
+    fi
 
-  # cloud-init userdata 生成（Python 脚本做模板渲染，变量通过命令行参数传入）
-  local gen_py="$SCRIPT_DIR/scripts/gen-userdata.py"
-  python3 "$gen_py" \
-    "${VM_NAME}" \
-    "${SUDO_USER}" \
-    "${SUDO_PASSWD}" \
-    "${ssh_keys_yaml}" \
-    "$USERDATA_OUT"
+    # 密码加密（SHA512，mkpasswd -m sha512 -s）
+    local hashed_passwd
+    hashed_passwd=$(mkpasswd -m sha512crypt -s <<< "$SUDO_PASSWD") || {
+      log "FATAL: mkpasswd 加密密码失败"
+      return 1
+    }
+
+    # cloud-init userdata 生成（Python 脚本做模板渲染，变量通过命令行参数传入）
+    local gen_py="$SCRIPT_DIR/scripts/gen-userdata.py"
+    python3 "$gen_py" \
+      "${VM_NAME}" \
+      "${SUDO_USER}" \
+      "${hashed_passwd}" \
+      "${ssh_keys_yaml}" \
+      "$USERDATA_OUT"
 
   log "cloud-init userdata 生成完成: $USERDATA_OUT"
 
@@ -355,7 +360,8 @@ network:
       addresses:
         - ${IP_ADDRESS}/${NETMASK_BITS}
       nameservers:
-${dns_lines}
+        addresses:
+${dns_addr_lines}
       routes:
         - to: default
           via: ${GATEWAY}

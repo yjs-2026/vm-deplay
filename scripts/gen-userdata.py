@@ -27,6 +27,7 @@ def main():
     userdata = {
         "hostname": vm_name,
         "manage_etc_hosts": True,
+        "ssh_pwauth": True,
         "users": [
             {
                 "name": sudo_user,
@@ -34,7 +35,7 @@ def main():
                 "shell": "/bin/bash",
                 "sudo": "ALL=(ALL) NOPASSWD:ALL",
                 "lock_passwd": False,
-                "plain_text_passwd": sudo_pass,
+                "hashed_passwd": sudo_pass,
             }
         ],
         "packages": [
