@@ -131,10 +131,15 @@ step_vcenter() {
     --msgbox "VM 自动化部署向导\n\n请提供 vCenter 连接信息和 VM 部署参数" 8 60
   while true; do
     VC_URL=$(tui_input "" "vCenter 地址" "请输入 vCenter URL:\n例: https://vc.example.com" "https://192.168.218.6")
-    if validate_nonempty "$VC_URL" "vCenter URL"; then
-      validate_url "$VC_URL" "vCenter URL" && break
+    if ! validate_nonempty "$VC_URL" "vCenter URL"; then
+      tui_error "vCenter URL 不能为空"
+      continue
     fi
-    tui_error "$(validate_nonempty "$VC_URL" "vCenter URL" 2>&1 || true)"
+    if ! validate_url "$VC_URL" "vCenter URL"; then
+      tui_error "vCenter URL 格式无效，请输入以 http://、https:// 或 ftp:// 开头的 URL"
+      continue
+    fi
+    break
   done
 
   # VC_USER
@@ -146,7 +151,7 @@ step_vcenter() {
 
   # VC_PASS
   while true; do
-    VC_PASS=$(tui_password "密码" "请输入 vCenter 密码:" "VMware1!")
+    VC_PASS=$(tui_password "密码" "请输入 vCenter 密码:")
     if validate_nonempty "$VC_PASS" "密码"; then break; fi
     tui_error "密码不能为空"
   done
@@ -231,6 +236,9 @@ step_network() {
 
   # DNS_SERVERS（选填）
   DNS_SERVERS=$(tui_input "" "DNS 服务器" "请输入 DNS 服务器:\n（逗号分隔，多个 DNS 留空使用 Google DNS）\n例: 8.8.8.8,8.8.4.4" "192.168.218.2")
+
+  # NIC_NAME（网卡设备名）
+  NIC_NAME=$(tui_input "" "网卡名称" "请输入 VM 的网卡名称:\n（cloud-init 网络配置中的设备名，默认为 ens33）" "ens33")
 }
 
 # ---------- 步骤 4: 系统配置 ----------
@@ -298,14 +306,14 @@ gen_cloudinit_data() {
   USERDATA_OUT="$ud"
 
   # DNS 格式化
-  local dns_lines="        addresses:"
+  local dns_lines=""
   if [[ -n "$DNS_SERVERS" ]]; then
     for d in $(echo "$DNS_SERVERS" | tr ',' ' '); do
       dns_lines+="
           - ${d}"
     done
   else
-    dns_lines+="
+    dns_lines="
           - 8.8.8.8
           - 8.8.4.4"
   fi
@@ -334,11 +342,16 @@ gen_cloudinit_data() {
   METADATA_OUT="$md"
 
   # metadata 中的 network config（Cloud Config Version 2）
-  local network_yaml=""
-  network_yaml="network:
+  # 必须以字符串形式放在 network.config 键下（VMware guestinfo 数据源要求）
+  # 注意：network.config 的值是多行 YAML 字符串，内部内容需整体缩进 2 空格
+
+  cat > "$md" << EOF
+instance-id: ${VM_NAME}-$(date +%s)
+local-hostname: ${VM_NAME}
+network:
   version: 2
   ethernets:
-    ens33:
+    ${NIC_NAME}:
       addresses:
         - ${IP_ADDRESS}/${NETMASK_BITS}
       nameservers:
@@ -347,12 +360,7 @@ ${dns_lines}
         - to: default
           via: ${GATEWAY}
       dhcp4: false
-      optional: false"
-
-  cat > "$md" << EOF
-instance-id: ${VM_NAME}-$(date +%s)
-local-hostname: ${VM_NAME}
-${network_yaml}
+      optional: false
 EOF
   log "cloud-init metadata 生成完成: $METADATA_OUT"
 }
@@ -379,6 +387,7 @@ do_deploy() {
   CPU="$CPU" \
   MEMORY_MB="$MEMORY_MB" \
   NETWORK_NAME="$PORTGROUP" \
+  NIC_NAME="$NIC_NAME" \
   CLOUDINIT_USERDATA="$userdata" \
   CLOUDINIT_METADATA="$metadata" \
   LOG_FILE="$LOG_FILE" \

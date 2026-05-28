@@ -1,0 +1,34 @@
+#cloud-config
+hostname: vm01
+manage_etc_hosts: true
+users:
+- name: ubuntu
+  groups: sudo
+  shell: /bin/bash
+  sudo: ALL=(ALL) NOPASSWD:ALL
+  lock_passwd: false
+  plain_text_passwd: VMware1!
+  ssh-authorized-keys:
+  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJMVB1nePru/KKDptITYc5a/+/m6kdiYc/QX7RpLGX4D
+    jinsongy@ASUS-Zenbook-14
+packages:
+- curl
+- wget
+- tar
+- gzip
+- net-tools
+- rsync
+- cloud-init
+- cloud-utils
+- growpart
+- parted
+runcmd:
+- 'bash -c "TARGET=$(getent passwd ubuntu | cut -d: -f6) && [ -n \$TARGET ] && tar
+  -xzf /var/soft/qoder.tgz -C \$TARGET 2>/dev/null || true"'
+- bash -c 'ls -la /home/*/.qoder/ 2>/dev/null || true'
+- bash -c "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  && systemctl restart ssh"
+power_state:
+  mode: reboot
+  delay: now
+  condition: true

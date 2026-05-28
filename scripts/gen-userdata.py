@@ -52,9 +52,18 @@ def main():
         },
     }
 
+    # SSH 公钥必须嵌套在对应用户的 ssh-authorized-keys 下，不是顶层 key
     if ssh_keys.strip():
-        keys_list = [k.strip() for k in ssh_keys.strip().splitlines() if k.strip()]
-        userdata["ssh_authorized_keys"] = keys_list
+        # ssh_keys 格式为多行 "- ssh-ed25519 ..."，需剥掉 "- " 前缀还原原始公钥
+        keys_list = []
+        for line in ssh_keys.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("- "):
+                line = line[2:]
+            keys_list.append(line)
+        userdata["users"][0]["ssh-authorized-keys"] = keys_list
 
     with open(out_path, "w") as f:
         f.write("#cloud-config\n")

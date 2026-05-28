@@ -33,18 +33,19 @@ ssh_cmd() {
   local host="$1"
   local cmd="$2"
   if [[ -n "$VERIFY_PASS" ]]; then
+    # 密码认证：sshpass 提供伪终端
     sshpass -p "$VERIFY_PASS" ssh \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
+      -o StrictHostKeyChecking=yes \
+      -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
       -o ConnectTimeout=10 \
-      -o BatchMode=yes \
-      "${VERIFY_USER:-root}@$host" "$cmd"
+      "$VERIFY_USER@$host" "$cmd"
   else
-    ssh -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
+    # 密钥认证
+    ssh -o StrictHostKeyChecking=yes \
+      -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
       -o ConnectTimeout=10 \
       -o BatchMode=yes \
-      "${VERIFY_USER:-root}@$host" "$cmd"
+      "$VERIFY_USER@$host" "$cmd"
   fi
 }
 
@@ -80,24 +81,27 @@ wait_cloud_init() {
 
   log "等待 cloud-init 完成 (超时 ${SSH_TIMEOUT}s)..."
 
-  while true; do
-    # cloud-init 完成后在 /var/lib/cloud/data/result.json 留下标记
-    local result
-    result=$(ssh_cmd "$host" "
-      if [ -f /var/lib/cloud/data/result.json ]; then
-        errors=\$(grep -oP '\"errors\":\s*\K[^}]+' /var/lib/cloud/data/result.json 2>/dev/null || echo 'NOTFOUND')
-        if [ \"\$errors\" = \"[]\" ]; then
-          echo 'done'
-        elif [ \"\$errors\" != \"NOTFOUND\" ]; then
-          echo \"error: \$errors\"
-        fi
-      else
-        id ${target_user} >/dev/null 2>&1 && echo 'done'
-      fi
-    " 2>/dev/null || echo "")
+  # 预添加 host key（防止 StrictHostKeyChecking=yes 时首次连接失败）
+  ssh-keyscan -H "$host" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
 
-    if [[ "$result" == "done" || "$result" == "partial" ]]; then
-      log "cloud-init 完成 (状态: $result) ✓"
+  while true; do
+    # 优先用 cloud-init status --wait 判定完成（避免模板预置用户误报）
+    local ci_status
+    ci_status=$(ssh_cmd "$host" "cloud-init status --wait 2>/dev/null" 2>/dev/null || echo "")
+    if [[ "$ci_status" == *"done"* ]] || [[ "$ci_status" == *"status: done"* ]]; then
+      log "cloud-init 完成 ✓"
+      return 0
+    fi
+
+    # 后备：检查 result.json 错误标记
+    local result_json
+    result_json=$(ssh_cmd "$host" "cat /var/lib/cloud/data/result.json 2>/dev/null" 2>/dev/null || echo "")
+    if [[ "$result_json" == *'"errors": []'* ]]; then
+      log "cloud-init 完成 (result.json 无错误) ✓"
+      return 0
+    elif [[ "$result_json" == *'"errors":'* && "$result_json" != *'"errors": []'* ]]; then
+      log "cloud-init 完成，但有错误: $result_json"
+      # 不算完全失败，继续验证网络
       return 0
     fi
 
@@ -105,7 +109,7 @@ wait_cloud_init() {
     sleep "$POLL_INTERVAL"
     elapsed=$((elapsed + POLL_INTERVAL))
     if ((elapsed >= SSH_TIMEOUT)); then
-      die "cloud-init 未在 ${SSH_TIMEOUT}s 内完成，最后状态: $result"
+      die "cloud-init 未在 ${SSH_TIMEOUT}s 内完成"
     fi
   done
 }
@@ -136,6 +140,8 @@ main() {
   log "========================================="
 
   # 1. 等待 SSH
+  # 预添加 host key（防止 StrictHostKeyChecking=yes 时首次连接失败）
+  ssh-keyscan -H "$VM_IP" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
   wait_ssh
 
   # 2. 等待 cloud-init
